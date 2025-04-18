@@ -1,304 +1,300 @@
+#!/bin/bash
+
 # ==================================================
-# Скрипт автоматической установки Xray (VLESS + WS + TLS)
-# Ориентирован на: Ubuntu 20.04+, Debian 10+, CentOS 7+
-# Особенности: Самоподписанный сертификат (подключение по IP), порт 8443, QR-код.
-# Включает автоматическое включение TCP BBR для оптимизации скорости.
+# Automatic Installation Script for Xray (VLESS + WS + TLS)
+# Targeted at: Ubuntu 20.04+, Debian 10+, CentOS 7+
+# Features: Two nodes (443 and 8443) with Certbot SSL, separate configs, systemd services, and QR codes.
+# Includes TCP BBR for speed optimization.
 # ==================================================
 
-# === Конфигурационные переменные ===
-VLESS_PORT=8443
-WS_PATH="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 12)"
-LOG_DIR="/var/log/xray"
-CONFIG_DIR="/usr/local/etc/xray"
-CERT_DIR="/usr/local/etc/xray/certs"
-CERT_FILE="${CERT_DIR}/server.crt"
-KEY_FILE="${CERT_DIR}/server.key"
+# === Configuration Variables ===
+TRADING_PORT=443
+FINANCE_PORT=8443
+TRADING_NAME="Trading-Line"
+FINANCE_NAME="Finance-Line"
+LOG_BASE_DIR="/var/log/xray"
+CONFIG_BASE_DIR="/etc/xray"
+CERT_BASE_DIR="/etc/letsencrypt/live"
 
-# === Вспомогательные функции ===
+# === Helper Functions ===
 Color_Off='\033[0m'; BGreen='\033[1;32m'; BYellow='\033[1;33m'; BRed='\033[1;31m'; BCyan='\033[1;36m'
 log_info() { echo -e "${BCyan}[INFO] ${1}${Color_Off}"; }
 log_warn() { echo -e "${BYellow}[WARN] ${1}${Color_Off}"; }
 log_error() { echo -e "${BRed}[ERROR] ${1}${Color_Off}"; exit 1; }
 
-# === Проверка прав суперпользователя ===
+# === Check for Root Privileges ===
 if [[ "$EUID" -ne 0 ]]; then
-  log_error "Этот скрипт необходимо запускать с правами root (sudo)."
+  log_error "This script must be run with root privileges (sudo)."
 fi
 
-# === Определение пути для QR-кода ===
+# === Determine QR Code Path ===
 USER_HOME=""
 if [[ -n "$SUDO_USER" ]]; then
     if command -v getent &> /dev/null; then
         USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
     else
-        log_warn "Команда 'getent' не найдена."
+        log_warn "Command 'getent' not found."
     fi
 fi
 if [[ -z "$USER_HOME" ]]; then
     USER_HOME="/root"
-    log_warn "Не удалось определить домашний каталог пользователя sudo или getent не найден. QR-код будет сохранен в ${USER_HOME}"
+    log_warn "Could not determine sudo user's home directory. Using ${USER_HOME} for QR codes."
 fi
-QR_CODE_FILE="${USER_HOME}/vless_qr.png"
-mkdir -p "$(dirname "$QR_CODE_FILE")"
-if [[ -n "$SUDO_USER" && -n "$USER_HOME" && "$USER_HOME" != "/root" ]]; then
-    NEED_CHOWN_QR=true
-else
-    NEED_CHOWN_QR=false
-fi
+mkdir -p "$USER_HOME"
 
-# === Начало выполнения скрипта ===
-log_info "Запуск скрипта установки VLESS VPN на базе Xray..."
-log_info "Выбран порт: ${VLESS_PORT}"
-log_info "QR-код будет сохранен в: ${QR_CODE_FILE}"
-set -eu # Прерывание при ошибках и неопределенных переменных
+# === Start Script Execution ===
+log_info "Starting Xray installation script for two nodes..."
+log_info "Node 1: Trading-Line on port ${TRADING_PORT}"
+log_info "Node 2: Finance-Line on port ${FINANCE_PORT}"
 
-# === Определение ОС и установка зависимостей ===
-log_info "Определение операционной системы и установка зависимостей..."
+# === Determine OS and Install Dependencies ===
+log_info "Determining operating system and installing dependencies..."
 if [[ -f /etc/os-release ]]; then
     . /etc/os-release
     OS=$ID
     VERSION_ID=$VERSION_ID
 else
-    log_error "Не удалось определить операционную систему."
+    log_error "Unable to determine operating system."
 fi
-log_info "Обнаружена ОС: $OS $VERSION_ID"
+log_info "Detected OS: $OS $VERSION_ID"
 
-log_info "Обновление списка пакетов и установка зависимостей..."
+log_info "Updating package list and installing dependencies..."
 case $OS in
     ubuntu|debian)
         apt update
-        apt install -y curl wget unzip socat qrencode jq coreutils openssl bash-completion
+        apt install -y curl wget unzip socat qrencode jq coreutils openssl bash-completion certbot
         ;;
     centos|almalinux|rocky)
         if [[ "$OS" == "centos" && "$VERSION_ID" == "7" ]]; then
-             log_info "Установка репозитория EPEL для CentOS 7..."
-             yum install -y epel-release || log_warn "Не удалось установить epel-release."
+             log_info "Installing EPEL repository for CentOS 7..."
+             yum install -y epel-release || log_warn "Failed to install epel-release."
         fi
         yum update -y
-        yum install -y curl wget unzip socat qrencode jq coreutils openssl bash-completion policycoreutils-python-utils util-linux
+        yum install -y curl wget unzip socat qrencode jq coreutils openssl bash-completion policycoreutils-python-utils util-linux certbot
         ;;
     *)
-        log_error "Операционная система $OS не поддерживается этим скриптом."
+        log_error "Operating system $OS is not supported by this script."
         ;;
 esac
-log_info "Зависимости успешно установлены."
+log_info "Dependencies successfully installed."
 
-# === Включение TCP BBR (для оптимизации скорости) ===
-log_info "Включение TCP BBR для оптимизации скорости сети..."
+# === Enable TCP BBR ===
+log_info "Enabling TCP BBR for network speed optimization..."
 BBR_CONF="/etc/sysctl.d/99-bbr.conf"
-# Проверяем, есть ли уже файл и содержит ли он нужные строки (простая проверка)
 if ! grep -q "net.core.default_qdisc=fq" "$BBR_CONF" 2>/dev/null ; then
     echo "net.core.default_qdisc=fq" | tee "$BBR_CONF" > /dev/null
 fi
 if ! grep -q "net.ipv4.tcp_congestion_control=bbr" "$BBR_CONF" 2>/dev/null ; then
     echo "net.ipv4.tcp_congestion_control=bbr" | tee -a "$BBR_CONF" > /dev/null
 fi
-# Применяем настройки из файла
-log_info "Применение настроек sysctl для BBR..."
+log_info "Applying sysctl settings for BBR..."
 if sysctl -p "$BBR_CONF"; then
-    log_info "Настройки TCP BBR успешно применены."
+    log_info "TCP BBR settings successfully applied."
 else
-    log_warn "Не удалось применить настройки sysctl из $BBR_CONF. Возможно, BBR не поддерживается ядром вашей системы (требуется ядро 4.9+)."
+    log_warn "Failed to apply BBR settings. BBR may not be supported (requires kernel 4.9+)."
 fi
 
-# === Установка Xray ===
-log_info "Установка последней стабильной версии Xray..."
+# === Install Xray ===
+log_info "Installing the latest stable version of Xray..."
 if ! bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install; then
-    log_error "Ошибка при выполнении скрипта установки Xray."
+    log_error "Error executing Xray installation script."
 fi
 if ! command -v xray &> /dev/null; then
-    log_error "Команда 'xray' не найдена после установки."
+    log_error "Command 'xray' not found after installation."
 fi
-log_info "Xray успешно установлен: $(xray version | head -n 1)"
+log_info "Xray successfully installed: $(xray version | head -n 1)"
 
-# === Генерация UUID ===
-USER_UUID=$(xray uuid)
-if [[ -z "$USER_UUID" ]]; then
-    log_error "Не удалось сгенерировать UUID с помощью 'xray uuid'."
+# === Input for Domains ===
+log_info "Please enter the domain for Trading-Line (port ${TRADING_PORT}):"
+read TRADING_DOMAIN
+log_info "Please enter the domain for Finance-Line (port ${FINANCE_PORT}):"
+read FINANCE_DOMAIN
+
+# === Obtain SSL Certificates with Certbot ===
+log_info "Obtaining SSL certificates using Certbot..."
+certbot certonly --standalone --agree-tos --register-unsafely-without-email -d "$TRADING_DOMAIN"
+certbot certonly --standalone --agree-tos --register-unsafely-without-email -d "$FINANCE_DOMAIN"
+TRADING_CERT_DIR="${CERT_BASE_DIR}/${TRADING_DOMAIN}"
+FINANCE_CERT_DIR="${CERT_BASE_DIR}/${FINANCE_DOMAIN}"
+if [[ ! -f "${TRADING_CERT_DIR}/fullchain.pem" || ! -f "${TRADING_CERT_DIR}/privkey.pem" ]]; then
+    log_error "Certbot failed to generate certificates for ${TRADING_DOMAIN}."
 fi
-log_info "Сгенерирован UUID пользователя: ${USER_UUID}"
+if [[ ! -f "${FINANCE_CERT_DIR}/fullchain.pem" || ! -f "${FINANCE_CERT_DIR}/privkey.pem" ]]; then
+    log_error "Certbot failed to generate certificates for ${FINANCE_DOMAIN}."
+fi
+log_info "SSL certificates obtained successfully."
 
-# === Настройка Firewall ===
-log_info "Настройка брандмауэра для порта ${VLESS_PORT}/tcp..."
+# === Generate UUIDs ===
+TRADING_UUID=$(xray uuid)
+FINANCE_UUID=$(xray uuid)
+log_info "Generated UUID for Trading-Line: ${TRADING_UUID}"
+log_info "Generated UUID for Finance-Line: ${FINANCE_UUID}"
+
+# === Configure Firewall ===
+log_info "Configuring firewall for ports ${TRADING_PORT}/tcp and ${FINANCE_PORT}/tcp..."
 if command -v ufw &> /dev/null; then
-    log_info "Обнаружен UFW. Открытие порта ${VLESS_PORT}/tcp..."
-    ufw allow ${VLESS_PORT}/tcp || log_warn "Команда 'ufw allow' завершилась с ошибкой."
+    log_info "Detected UFW. Opening ports..."
+    ufw allow ${TRADING_PORT}/tcp || log_warn "Failed to allow port ${TRADING_PORT}/tcp."
+    ufw allow ${FINANCE_PORT}/tcp || log_warn "Failed to allow port ${FINANCE_PORT}/tcp."
     if ufw status | grep -qw active; then
-        ufw reload || log_error "Не удалось перезагрузить правила UFW."
+        ufw reload || log_error "Failed to reload UFW rules."
     else
-        log_warn "UFW не активен (inactive). Правило добавлено, но firewall не работает. Активируйте его командой 'sudo ufw enable', если нужно."
+        log_warn "UFW is inactive. Rules added but not enforced."
     fi
-    log_info "Порт ${VLESS_PORT}/tcp настроен в UFW."
 elif command -v firewall-cmd &> /dev/null; then
-    log_info "Обнаружен firewalld. Открытие порта ${VLESS_PORT}/tcp..."
-    firewall-cmd --permanent --add-port=${VLESS_PORT}/tcp || log_warn "Команда 'firewall-cmd --add-port' завершилась с ошибкой."
+    log_info "Detected firewalld. Opening ports..."
+    firewall-cmd --permanent --add-port=${TRADING_PORT}/tcp || log_warn "Failed to add port ${TRADING_PORT}/tcp."
+    firewall-cmd --permanent --add-port=${FINANCE_PORT}/tcp || log_warn "Failed to add port ${FINANCE_PORT}/tcp."
     if systemctl is-active --quiet firewalld; then
-        firewall-cmd --reload || log_error "Не удалось перезагрузить правила firewalld."
+        firewall-cmd --reload || log_error "Failed to reload firewalld rules."
     else
-         log_warn "Служба firewalld не активна. Правило добавлено, но firewall не работает."
+        log_warn "firewalld is inactive. Rules added but not enforced."
     fi
-    log_info "Порт ${VLESS_PORT}/tcp настроен в firewalld."
-    if [[ -f /usr/sbin/sestatus ]] && sestatus | grep "SELinux status:" | grep -q "enabled"; then
-        log_info "Обнаружен включенный SELinux. Настройка для порта ${VLESS_PORT}..."
-        if command -v semanage &> /dev/null; then
-            semanage port -a -t http_port_t -p tcp ${VLESS_PORT} || log_warn "Не удалось добавить правило SELinux для порта ${VLESS_PORT}."
-            setsebool -P httpd_can_network_connect 1 || log_warn "Не удалось установить булево значение httpd_can_network_connect в SELinux."
-            log_info "SELinux настроен для порта ${VLESS_PORT}."
-        else
-            log_warn "Команда 'semanage' не найдена. Пропустите настройку SELinux."
-        fi
+    if [[ -f /usr/sbin/sestatus ]] && sestatus | grep -q "enabled"; then
+        log_info "Configuring SELinux for ports..."
+        semanage port -a -t http_port_t -p tcp ${TRADING_PORT} || log_warn "Failed to configure SELinux for port ${TRADING_PORT}."
+        semanage port -a -t http_port_t -p tcp ${FINANCE_PORT} || log_warn "Failed to configure SELinux for port ${FINANCE_PORT}."
     fi
 else
-    log_warn "Не удалось обнаружить UFW или firewalld. Убедитесь, что порт ${VLESS_PORT}/tcp открыт вручную."
+    log_warn "No UFW or firewalld detected. Ensure ports ${TRADING_PORT}/tcp and ${FINANCE_PORT}/tcp are open manually."
 fi
 
-# === Генерация самоподписанного сертификата TLS ===
-log_info "Генерация самоподписанного TLS сертификата..."
-SERVER_IP=$(curl -s4 https://ipinfo.io/ip || curl -s4 https://api.ipify.org || curl -s4 https://ifconfig.me)
-if [[ -z "$SERVER_IP" ]]; then
-    log_error "Не удалось автоматически определить публичный IPv4-адрес сервера."
-fi
-log_info "Публичный IP-адрес сервера: $SERVER_IP"
-mkdir -p "$CERT_DIR"
-log_info "Создание ключа ${KEY_FILE} и сертификата ${CERT_FILE}..."
-if ! openssl req -x509 -nodes -newkey rsa:2048 \
-    -keyout "$KEY_FILE" \
-    -out "$CERT_FILE" \
-    -days 3650 \
-    -subj "/CN=${SERVER_IP}" \
-    -addext "subjectAltName = IP:${SERVER_IP}"; then
-    log_error "Ошибка при генерации TLS сертификата с помощью openssl."
-fi
-if [[ ! -f "$CERT_FILE" || ! -f "$KEY_FILE" ]]; then
-    log_error "Файлы TLS сертификата (${CERT_FILE}) или ключа (${KEY_FILE}) не найдены после генерации."
-fi
-log_info "TLS сертификат успешно сгенерирован для IP: $SERVER_IP"
-chmod 644 "$CERT_FILE"
-chgrp nogroup "$KEY_FILE" || log_warn "Не удалось изменить группу файла ключа ${KEY_FILE} на 'nogroup'."
-chmod 640 "$KEY_FILE"
-log_info "Установлены права доступа к файлам сертификата (Сертификат: 644, Ключ: 640, Группа ключа: nogroup)."
-
-# === Создание конфигурационного файла Xray ===
-log_info "Создание конфигурационного файла Xray: ${CONFIG_DIR}/config.json"
-mkdir -p "$LOG_DIR"
-chown nobody:nogroup "$LOG_DIR" || log_warn "Не удалось изменить владельца ${LOG_DIR} на nobody:nogroup."
-cat > "${CONFIG_DIR}/config.json" << EOF
+# === Create Trading-Line Configuration ===
+TRADING_CONFIG_DIR="${CONFIG_BASE_DIR}/trading"
+TRADING_LOG_DIR="${LOG_BASE_DIR}/trading"
+TRADING_WS_PATH="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 12)"
+mkdir -p "$TRADING_CONFIG_DIR" "$TRADING_LOG_DIR"
+chown nobody:nogroup "$TRADING_LOG_DIR" || log_warn "Failed to set ownership of ${TRADING_LOG_DIR}."
+cat > "${TRADING_CONFIG_DIR}/config.json" << EOF
 {
-  "log": { "loglevel": "warning", "access": "${LOG_DIR}/access.log", "error": "${LOG_DIR}/error.log" },
-  "dns": { "servers": ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query", "https://9.9.9.9/dns-query", "1.1.1.1", "8.8.8.8", "9.9.9.9", "localhost"], "queryStrategy": "UseIP" },
+  "log": { "loglevel": "warning", "access": "${TRADING_LOG_DIR}/access.log", "error": "${TRADING_LOG_DIR}/error.log" },
+  "dns": { "servers": ["https://1.1.1.1/dns-query", "8.8.8.8", "9.9.9.9"], "queryStrategy": "UseIP" },
   "inbounds": [ {
-      "port": ${VLESS_PORT}, "protocol": "vless",
-      "settings": { "clients": [ { "id": "${USER_UUID}" } ], "decryption": "none" },
+      "port": ${TRADING_PORT}, "protocol": "vless",
+      "settings": { "clients": [ { "id": "${TRADING_UUID}" } ], "decryption": "none" },
       "streamSettings": {
         "network": "ws", "security": "tls",
-        "tlsSettings": { "alpn": ["http/1.1"], "minVersion": "1.3", "certificates": [ { "certificateFile": "${CERT_FILE}", "keyFile": "${KEY_FILE}" } ] },
-        "wsSettings": { "path": "${WS_PATH}", "headers": { "Host": "${SERVER_IP}" } }
+        "tlsSettings": { "alpn": ["http/1.1"], "certificates": [ { "certificateFile": "${TRADING_CERT_DIR}/fullchain.pem", "keyFile": "${TRADING_CERT_DIR}/privkey.pem" } ] },
+        "wsSettings": { "path": "${TRADING_WS_PATH}", "headers": { "Host": "${TRADING_DOMAIN}" } }
       },
-      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "fakedns"] }
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
   } ],
-  "outbounds": [ { "protocol": "freedom", "settings": {}, "tag": "direct" }, { "protocol": "blackhole", "settings": {}, "tag": "block" } ],
-  "routing": { "domainStrategy": "IPIfNonMatch", "rules": [ { "type": "field", "port": 53, "network": "udp", "outboundTag": "direct" } ] }
+  "outbounds": [ { "protocol": "freedom", "tag": "direct" }, { "protocol": "blackhole", "tag": "block" } ]
 }
 EOF
-log_info "Конфигурационный файл Xray создан."
+log_info "Trading-Line configuration created at ${TRADING_CONFIG_DIR}/config.json."
 
-# === Проверка конфигурации Xray ===
-log_info "Проверка конфигурации Xray..."
-if ! /usr/local/bin/xray -test -config "${CONFIG_DIR}/config.json"; then
-    log_error "Конфигурация Xray (${CONFIG_DIR}/config.json) содержит ошибки."
+# === Create Finance-Line Configuration ===
+FINANCE_CONFIG_DIR="${CONFIG_BASE_DIR}/finance"
+FINANCE_LOG_DIR="${LOG_BASE_DIR}/finance"
+FINANCE_WS_PATH="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 12)"
+mkdir -p "$FINANCE_CONFIG_DIR" "$FINANCE_LOG_DIR"
+chown nobody:nogroup "$FINANCE_LOG_DIR" || log_warn "Failed to set ownership of ${FINANCE_LOG_DIR}."
+cat > "${FINANCE_CONFIG_DIR}/config.json" << EOF
+{
+  "log": { "loglevel": "warning", "access": "${FINANCE_LOG_DIR}/access.log", "error": "${FINANCE_LOG_DIR}/error.log" },
+  "dns": { "servers": ["https://1.1.1.1/dns-query", "8.8.8.8", "9.9.9.9"], "queryStrategy": "UseIP" },
+  "inbounds": [ {
+      "port": ${FINANCE_PORT}, "protocol": "vless",
+      "settings": { "clients": [ { "id": "${FINANCE_UUID}" } ], "decryption": "none" },
+      "streamSettings": {
+        "network": "ws", "security": "tls",
+        "tlsSettings": { "alpn": ["http/1.1"], "certificates": [ { "certificateFile": "${FINANCE_CERT_DIR}/fullchain.pem", "keyFile": "${FINANCE_CERT_DIR}/privkey.pem" } ] },
+        "wsSettings": { "path": "${FINANCE_WS_PATH}", "headers": { "Host": "${FINANCE_DOMAIN}" } }
+      },
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
+  } ],
+  "outbounds": [ { "protocol": "freedom", "tag": "direct" }, { "protocol": "blackhole", "tag": "block" } ]
+}
+EOF
+log_info "Finance-Line configuration created at ${FINANCE_CONFIG_DIR}/config.json."
+
+# === Validate Configurations ===
+log_info "Validating Xray configurations..."
+/usr/local/bin/xray -test -config "${TRADING_CONFIG_DIR}/config.json" || log_error "Trading-Line configuration is invalid."
+/usr/local/bin/xray -test -config "${FINANCE_CONFIG_DIR}/config.json" || log_error "Finance-Line configuration is invalid."
+log_info "Both configurations are valid."
+
+# === Set Up Systemd Services ===
+log_info "Setting up systemd services for both nodes..."
+cat > /lib/systemd/system/xray-trading.service << EOF
+[Unit]
+Description=Xray Trading-Line Service
+After=network.target
+
+[Service]
+User=nobody
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+ExecStart=/usr/local/bin/xray run -config ${TRADING_CONFIG_DIR}/config.json
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /lib/systemd/system/xray-finance.service << EOF
+[Unit]
+Description=Xray Finance-Line Service
+After=network.target
+
+[Service]
+User=nobody
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+ExecStart=/usr/local/bin/xray run -config ${FINANCE_CONFIG_DIR}/config.json
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable xray-trading xray-finance || log_warn "Failed to enable one or both services."
+systemctl restart xray-trading xray-finance || log_error "Failed to start one or both services."
+log_info "Systemd services configured and started."
+
+# === Generate VLESS Links and QR Codes ===
+log_info "Generating VLESS links and QR codes..."
+TRADING_WS_PATH_ENCODED=$(printf %s "${TRADING_WS_PATH}" | jq -sRr @uri)
+FINANCE_WS_PATH_ENCODED=$(printf %s "${FINANCE_WS_PATH}" | jq -sRr @uri)
+TRADING_VLESS_LINK="vless://${TRADING_UUID}@${TRADING_DOMAIN}:${TRADING_PORT}?type=ws&path=${TRADING_WS_PATH_ENCODED}&security=tls&sni=${TRADING_DOMAIN}#${TRADING_NAME}"
+FINANCE_VLESS_LINK="vless://${FINANCE_UUID}@${FINANCE_DOMAIN}:${FINANCE_PORT}?type=ws&path=${FINANCE_WS_PATH_ENCODED}&security=tls&sni=${FINANCE_DOMAIN}#${FINANCE_NAME}"
+
+qrencode -o "${USER_HOME}/trading_qr.png" "$TRADING_VLESS_LINK" || log_warn "Failed to generate Trading-Line QR code."
+qrencode -o "${USER_HOME}/finance_qr.png" "$FINANCE_VLESS_LINK" || log_warn "Failed to generate Finance-Line QR code."
+if [[ -n "$SUDO_USER" && "$USER_HOME" != "/root" ]]; then
+    chown "$SUDO_USER":"$(id -gn "$SUDO_USER")" "${USER_HOME}/trading_qr.png" "${USER_HOME}/finance_qr.png" || log_warn "Failed to set QR code ownership."
 fi
-log_info "Конфигурация Xray корректна."
+log_info "QR codes saved: ${USER_HOME}/trading_qr.png and ${USER_HOME}/finance_qr.png"
 
-# === Настройка и запуск службы Xray ===
-log_info "Настройка и перезапуск службы Xray через systemd..."
-systemctl enable xray || log_warn "Не удалось включить автозапуск службы Xray."
-systemctl restart xray || log_error "Не удалось перезапустить службу Xray."
-log_info "Ожидание запуска службы Xray (3 секунды)..."
-sleep 3
-if ! systemctl is-active --quiet xray; then
-    log_error "Служба Xray не запустилась. Проверьте логи: journalctl -u xray -n 50 --no-pager или ${LOG_DIR}/error.log"
-fi
-log_info "Служба Xray успешно запущена и работает."
-
-# === Генерация VLESS ссылки и QR-кода ===
-log_info "Генерация VLESS ссылки и QR-кода..."
-if ! command -v jq &> /dev/null; then log_error "Команда 'jq' не найдена."; fi
-WS_PATH_ENCODED=$(printf %s "${WS_PATH}" | jq -sRr @uri)
-if [[ -z "$WS_PATH_ENCODED" ]]; then log_error "Не удалось URL-кодировать путь WebSocket."; fi
-VLESS_LINK="vless://${USER_UUID}@${SERVER_IP}:${VLESS_PORT}?type=ws&path=${WS_PATH_ENCODED}&security=tls&sni=${SERVER_IP}&allowInsecure=1#VLESS-WS-TLS-${SERVER_IP}"
-
-QR_CODE_GENERATED=false
-if command -v qrencode &> /dev/null; then
-    if qrencode -o "$QR_CODE_FILE" "$VLESS_LINK"; then
-        log_info "QR-код сохранен в файл: ${QR_CODE_FILE}"
-        QR_CODE_GENERATED=true
-        if [[ "$NEED_CHOWN_QR" = true ]]; then
-            if command -v id &> /dev/null; then
-                SUDO_USER_GROUP=$(id -gn "$SUDO_USER")
-                if [[ -n "$SUDO_USER_GROUP" ]]; then
-                     chown "$SUDO_USER":"$SUDO_USER_GROUP" "$QR_CODE_FILE" || log_warn "Не удалось изменить владельца файла QR-кода (${QR_CODE_FILE})."
-                else
-                     log_warn "Не удалось определить группу для пользователя $SUDO_USER."
-                fi
-            else
-                log_warn "Команда 'id' не найдена. Невозможно изменить владельца QR-кода."
-            fi
-        fi
-    else
-        log_warn "Не удалось сгенерировать QR-код в ${QR_CODE_FILE}."
-    fi
-else
-    log_warn "Команда 'qrencode' не найдена. QR-код не сгенерирован."
-fi
-
-# === Вывод итоговой информации ===
+# === Final Output ===
 log_info "=================================================="
-log_info "${BGreen} Установка VLESS VPN завершена! ${Color_Off}"
+log_info "${BGreen} Xray Installation Completed for Two Nodes! ${Color_Off}"
 log_info "=================================================="
-echo -e "${BYellow}IP-адрес сервера:${Color_Off} ${SERVER_IP}"
-echo -e "${BYellow}Порт:${Color_Off} ${VLESS_PORT}"
-echo -e "${BYellow}UUID:${Color_Off} ${USER_UUID}"
-echo -e "${BYellow}Транспорт:${Color_Off} WebSocket (ws)"
-echo -e "${BYellow}Путь WebSocket:${Color_Off} ${WS_PATH}"
-echo -e "${BYellow}Шифрование:${Color_Off} TLS 1.3 (самоподписанный сертификат)"
-echo -e "${BYellow}TCP Ускорение:${Color_Off} BBR включен (рекомендуется)"
+echo -e "${BYellow}Trading-Line:${Color_Off}"
+echo -e "  Domain: ${TRADING_DOMAIN}"
+echo -e "  Port: ${TRADING_PORT}"
+echo -e "  UUID: ${TRADING_UUID}"
+echo -e "  VLESS Link: ${TRADING_VLESS_LINK}"
+echo -e "  QR Code: ${USER_HOME}/trading_qr.png"
 echo ""
-echo -e "${BGreen}Ваша VLESS ссылка (скопируйте целиком):${Color_Off}"
-echo -e "${VLESS_LINK}"
+echo -e "${BYellow}Finance-Line:${Color_Off}"
+echo -e "  Domain: ${FINANCE_DOMAIN}"
+echo -e "  Port: ${FINANCE_PORT}"
+echo -e "  UUID: ${FINANCE_UUID}"
+echo -e "  VLESS Link: ${FINANCE_VLESS_LINK}"
+echo -e "  QR Code: ${USER_HOME}/finance_qr.png"
 echo ""
-if [[ "$QR_CODE_GENERATED" = true ]]; then
-    echo -e "${BGreen}QR-код для импорта конфигурации сохранен в:${Color_Off} ${QR_CODE_FILE}"
-    echo -e "${BYellow}Вы можете отобразить QR-код в консоли (если поддерживается UTF-8) командой:${Color_Off}"
-    echo -e "  qrencode -t ansiutf8 < \"${QR_CODE_FILE}\""
-    echo ""
-else
-    echo -e "${BYellow}QR-код не был сгенерирован.${Color_Off}"
-    echo ""
-fi
-echo -e "${BYellow}ВАЖНО - Настройка клиента:${Color_Off}"
-echo -e "   1. Импортируйте ссылку или QR-код в ваш клиент."
-echo -e "   2. ${BRed}ОБЯЗАТЕЛЬНО${Color_Off} включите опцию '${BRed}Разрешить небезопасное соединение${Color_Off}'"
-echo -e "      (Allow Insecure / skip cert verify / tlsAllowInsecure=1 и т.п.) в настройках TLS/Security."
-echo -e "   3. Убедитесь, что в поле SNI (Server Name Indication), Server Address, или Host указан IP-адрес сервера:"
-echo -e "      ${BRed}${SERVER_IP}${Color_Off}"
+echo -e "${BCyan}Service Management:${Color_Off}"
+echo -e "  Trading-Line: systemctl {start|stop|restart|status} xray-trading"
+echo -e "  Finance-Line: systemctl {start|stop|restart|status} xray-finance"
+echo -e "  Logs: ${LOG_BASE_DIR}/{trading,finance}/{access,error}.log"
 echo ""
-echo -e "${BCyan}--- Управление службой Xray ---${Color_Off}"
-echo -e "Проверить статус: ${BYellow}systemctl status xray${Color_Off}"
-echo -e "Перезапустить:   ${BYellow}systemctl restart xray${Color_Off}"
-echo -e "Остановить:      ${BYellow}systemctl stop xray${Color_Off}"
-echo -e "Включить автозапуск: ${BYellow}systemctl enable xray${Color_Off}"
-echo -e "Выключить автозапуск: ${BYellow}systemctl disable xray${Color_Off}"
-echo ""
-echo -e "${BCyan}--- Просмотр логов Xray ---${Color_Off}"
-echo -e "Лог ошибок (warning/error): ${BYellow}tail -f ${LOG_DIR}/error.log${Color_Off}"
-echo -e "Лог доступа (если включен): ${BYellow}tail -f ${LOG_DIR}/access.log${Color_Off}"
-echo -e "Полный лог службы (systemd): ${BYellow}journalctl -u xray --output cat -f${Color_Off}"
-echo ""
-echo -e "${BCyan}--- Дополнительная оптимизация ---${Color_Off}"
-echo -e "Для дальнейшей оптимизации скорости/задержки вы можете отредактировать файл ${CONFIG_DIR}/config.json"
-echo -e "и настроить параметры в секции 'policy', например, 'bufferSize'. Требуется тестирование."
-echo ""
-log_info "Установка завершена. Приятного использования!"
+log_info "Installation complete. Enjoy your VLESS nodes!"
 
-set +eu # Возвращаем нормальное поведение
 exit 0
