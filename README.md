@@ -40,9 +40,9 @@
 
 2.  **Скачайте скрипт:**
     ```bash
-    wget -O install-vless.sh https://github.com/Nerve11/Auto-intall-Xray-VLESS-WS-TLS/raw/refs/heads/main/install-vless.sh
+    wget -O install-vless.sh https://github.com/GoodyOG/Auto-intall-Xray-VLESS-WS-TLS/raw/refs/heads/main/install-vless.sh
     # ИЛИ если wget не установлен:
-    # curl -o install-vless.sh https://github.com/Nerve11/Auto-intall-Xray-VLESS-WS-TLS/raw/refs/heads/main/install-vless.sh
+    # curl -o install-vless.sh https://github.com/GoodyOG/Auto-intall-Xray-VLESS-WS-TLS/raw/refs/heads/main/install-vless.sh
     ```
 
 3.  **Сделайте скрипт исполняемым:**
